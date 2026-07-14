@@ -58,6 +58,7 @@ The command maps to the timer as `CCR1 = 100 + duty`, with `ARR = 200`:
 | [renode/gyro1d.cs](renode/gyro1d.cs) | The emulated gyroscope **and** the vehicle physics |
 | [renode/attitude.repl](renode/attitude.repl) | STM32F405 platform + the gyro on I2C1 |
 | [test.ps1](test.ps1) | Headless regression test, asserts on the firmware's telemetry |
+| [viz/](viz/) | Live 3D view of the vehicle, fed by the firmware's own UART |
 
 No vendor HAL, no CubeMX, no libc: the register map in
 [src/stm32f4_regs.h](src/stm32f4_regs.h) is hand-written, and the firmware links
@@ -79,6 +80,7 @@ Both scripts find their tools on `PATH`, in the usual install locations, or via
 .\build.ps1      # -> build\firmware.elf
 .\run.ps1        # -> Renode, with the USART2 window open
 .\test.ps1       # -> headless: replays both scenarios and checks the results
+.\viz\viz.ps1    # -> live 3D view at http://localhost:8080
 ```
 
 ## The demo
@@ -143,6 +145,34 @@ A textbook step response: the rate is arrested in ~0.4 s, the attitude peaks at
 at neutral. The plant gains are tunable from the monitor
 (`TorqueGain`, `Damping`), as are the PID gains at the top of
 [src/main.c](src/main.c).
+
+## Watching it move
+
+Renode has no 3D viewer, but the firmware already publishes everything a viewer
+needs on USART2. [viz/viz.ps1](viz/viz.ps1) wires that up end to end:
+
+```
+firmware --UART--> Renode --TCP--> viz.ps1 --SSE--> browser (canvas 3D)
+                                      ^
+                                      +-- monitor commands from the page
+```
+
+It boots Renode headless, connects USART2 to a socket terminal, and serves
+[viz/index.html](viz/index.html) on `http://localhost:8080`: the vehicle turns
+by the measured attitude against a fixed setpoint reference, a curved arrow shows
+the commanded torque, and a strip chart tracks the response. The buttons on the
+page go the other way — they are forwarded straight into the Renode monitor, so
+you can kick the vehicle and switch the plant model on without leaving the
+browser.
+
+No dependencies, nothing to install: the 3D is a hand-rolled painter's-algorithm
+renderer on a canvas, and the bridge is a plain `HttpListener` (no admin rights
+needed, it binds to `localhost` only).
+
+```powershell
+.\build.ps1
+.\viz\viz.ps1
+```
 
 ## The emulated gyroscope
 

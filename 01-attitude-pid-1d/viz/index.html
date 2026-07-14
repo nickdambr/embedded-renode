@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>1D attitude control - live</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --line: #262d36;
+    --text: #d6deeb;
+    --dim: #7d8799;
+    --accent: #4ea1ff;
+    --warn: #ff6b6b;
+    --ok: #3ddc97;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  header .sub { color: var(--dim); font-size: 13px; }
+  #link { margin-left: auto; }
+  #link a { color: var(--dim); text-decoration: none; }
+  #link a:hover { color: var(--accent); }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 16px;
+    padding: 16px 20px;
+    align-items: start;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+  }
+  .card h2 {
+    margin: 0 0 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  canvas { display: block; width: 100%; }
+
+  .readouts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .ro { background: #10151c; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  .ro .k { color: var(--dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+  .ro .v { font-family: Consolas, "Cascadia Mono", monospace; font-size: 19px; font-variant-numeric: tabular-nums; }
+
+  .duty-wrap { margin-top: 14px; }
+  .duty-bar { position: relative; height: 12px; background: #10151c; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .duty-fill { position: absolute; top: 0; bottom: 0; left: 50%; width: 0; background: var(--accent); }
+  .duty-mid { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: var(--dim); }
+  .duty-scale { display: flex; justify-content: space-between; color: var(--dim); font-size: 10px; margin-top: 4px; }
+
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+  button {
+    background: #1d232c; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 8px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: #fff; }
+  button.wide { grid-column: 1 / -1; }
+  button.on { border-color: var(--ok); color: var(--ok); }
+
+  #status { margin-top: 12px; font-size: 12px; color: var(--dim); }
+  #status.live::before { content: "\25CF "; color: var(--ok); }
+  #status.down::before { content: "\25CF "; color: var(--warn); }
+
+  #console {
+    margin-top: 16px; height: 130px; overflow-y: auto;
+    background: #0b0e13; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; font-family: Consolas, monospace; font-size: 11.5px;
+    color: var(--dim); white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Single-axis attitude control</h1>
+  <span class="sub">STM32F405 in Renode &middot; gyro on I2C &middot; PID &rarr; PWM</span>
+  <span id="link"><a href="https://github.com/nickdambr/embedded-renode" target="_blank">github.com/nickdambr/embedded-renode</a></span>
+</header>
+
+<main>
+  <div>
+    <div class="card">
+      <h2>Vehicle</h2>
+      <canvas id="scene" width="900" height="440"></canvas>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Telemetry &mdash; last 20 s</h2>
+      <canvas id="chart" width="900" height="180"></canvas>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>State</h2>
+      <div class="readouts">
+        <div class="ro"><div class="k">Attitude</div><div class="v" id="v-angle">--</div></div>
+        <div class="ro"><div class="k">Body rate</div><div class="v" id="v-rate">--</div></div>
+        <div class="ro"><div class="k">Duty</div><div class="v" id="v-duty">--</div></div>
+        <div class="ro"><div class="k">TIM4 CCR1</div><div class="v" id="v-ccr">--</div></div>
+      </div>
+
+      <div class="duty-wrap">
+        <div class="duty-bar"><div class="duty-fill" id="duty-fill"></div><div class="duty-mid"></div></div>
+        <div class="duty-scale"><span>-100&thinsp;%</span><span>0</span><span>+100&thinsp;%</span></div>
+      </div>
+
+      <div id="status" class="down">connecting&hellip;</div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Disturbance</h2>
+      <div class="btns">
+        <button onclick="cmd('sysbus.i2c1.gyro AngularRateZ 30')">Kick +30&thinsp;&deg;/s</button>
+        <button onclick="cmd('sysbus.i2c1.gyro AngularRateZ -30')">Kick &minus;30&thinsp;&deg;/s</button>
+        <button class="wide" onclick="cmd('sysbus.i2c1.gyro AngularRateZ 0')">Stop rotation</button>
+        <button class="wide" id="btn-plant" onclick="togglePlant()">Plant model: OFF (open loop)</button>
+      </div>
+      <div id="console"></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+// ---------------------------------------------------------------- state ----
+let angle = 0, rate = 0, duty = 0, ccr = 100, tSim = 0;
+let plantOn = false;
+const history = [];               // {t, angle, duty}
+const HISTORY_SPAN = 20;          // seconds shown in the strip chart
+
+// ------------------------------------------------------------- transport ----
+const es = new EventSource('/events');
+const statusEl = document.getElementById('status');
+const consoleEl = document.getElementById('console');
+
+es.onopen = () => { statusEl.className = 'live'; statusEl.textContent = 'live from Renode'; };
+es.onerror = () => { statusEl.className = 'down'; statusEl.textContent = 'disconnected — is viz.ps1 still running?'; };
+
+// The firmware prints, at 10 Hz:
+//   t=+1.20 s  rate=-2.52 dps  angle=-0.23 deg  duty=+2.4 %  ccr=102
+const RX = /t=([+-][\d.]+) s\s+rate=([+-][\d.]+) dps\s+angle=([+-][\d.]+) deg\s+duty=([+-][\d.]+) %\s+ccr=(\d+)/;
+
+es.onmessage = (ev) => {
+  const line = ev.data;
+  const m = RX.exec(line);
+  if (m) {
+    tSim  = parseFloat(m[1]);
+    rate  = parseFloat(m[2]);
+    angle = parseFloat(m[3]);
+    duty  = parseFloat(m[4]);
+    ccr   = parseInt(m[5], 10);
+    history.push({ t: tSim, angle, duty });
+    while (history.length && tSim - history[0].t > HISTORY_SPAN) history.shift();
+    updateReadouts();
+  } else if (line.trim()) {
+    log(line);
+  }
+};
+
+function log(line) {
+  consoleEl.textContent += line + '\n';
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+function cmd(c) {
+  fetch('/cmd?c=' + encodeURIComponent(c)).catch(() => {});
+}
+
+function togglePlant() {
+  plantOn = !plantOn;
+  cmd('sysbus.i2c1.gyro PlantEnabled ' + (plantOn ? 'true' : 'false'));
+  const b = document.getElementById('btn-plant');
+  b.textContent = 'Plant model: ' + (plantOn ? 'ON (closed loop)' : 'OFF (open loop)');
+  b.classList.toggle('on', plantOn);
+}
+
+function updateReadouts() {
+  const f = (x, d) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(d);
+  document.getElementById('v-angle').textContent = f(angle, 2) + '°';
+  document.getElementById('v-rate').textContent  = f(rate, 1) + ' °/s';
+  document.getElementById('v-duty').textContent  = f(duty, 1) + ' %';
+  document.getElementById('v-ccr').textContent   = ccr;
+
+  const fill = document.getElementById('duty-fill');
+  const half = Math.max(-100, Math.min(100, duty)) / 2;   // percent of the full bar
+  fill.style.left  = (50 + Math.min(0, half)) + '%';
+  fill.style.width = Math.abs(half) + '%';
+  fill.style.background = duty >= 0 ? 'var(--accent)' : 'var(--warn)';
+}
+
+// ---------------------------------------------------------------- 3D view ----
+// A small hand-rolled renderer: no libraries, no CDN. Painter's algorithm over
+// convex quads is plenty for a rigid body with a handful of faces.
+const cv = document.getElementById('scene');
+const cx = cv.getContext('2d');
+
+const PITCH = 0.42;          // camera tilt, radians
+const DIST  = 9;             // camera distance
+const FOCAL = 780;
+
+function rotY(p, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c];
+}
+
+function project(p, w, h) {
+  const cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+  const y = p[1] * cp - p[2] * sp;
+  const z = p[1] * sp + p[2] * cp;
+  const f = FOCAL / (DIST + z);
+  return { x: w / 2 + p[0] * f, y: h / 2 - y * f, depth: DIST + z };
+}
+
+// Axis-aligned box -> 6 quads, as vertex index lists.
+function box(cxx, cyy, czz, sx, sy, sz, color) {
+  const v = [];
+  for (const dx of [-1, 1]) for (const dy of [-1, 1]) for (const dz of [-1, 1]) {
+    v.push([cxx + dx * sx / 2, cyy + dy * sy / 2, czz + dz * sz / 2]);
+  }
+  // index bits: dx=4, dy=2, dz=1
+  const quads = [
+    [0, 1, 3, 2], [4, 6, 7, 5],   // -x, +x
+    [0, 4, 5, 1], [2, 3, 7, 6],   // -y, +y
+    [0, 2, 6, 4], [1, 5, 7, 3],   // -z, +z
+  ];
+  return quads.map(q => ({ pts: q.map(i => v[i]), color }));
+}
+
+function bodyFaces() {
+  // Satellite bus plus two solar panels along the body X axis.
+  let f = box(0, 0, 0, 1.7, 1.5, 1.7, [64, 84, 112]);
+  f = f.concat(box(-2.6, 0, 0, 3.2, 0.08, 1.25, [34, 78, 140]));
+  f = f.concat(box( 2.6, 0, 0, 3.2, 0.08, 1.25, [34, 78, 140]));
+  // Nose marker: shows which way the body is pointing.
+  f = f.concat(box(0, 0, 1.15, 0.35, 0.35, 0.7, [255, 190, 60]));
+  return f;
+}
+
+function shade(rgb, pts) {
+  // Cheap lambert: normal of the (already rotated) quad against a fixed light.
+  const [a, b, c] = pts;
+  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  const len = Math.hypot(n[0], n[1], n[2]) || 1;
+  const L = [-0.42, 0.76, -0.5];
+  let d = (n[0] * L[0] + n[1] * L[1] + n[2] * L[2]) / len;
+  d = 0.45 + 0.55 * Math.abs(d);
+  return `rgb(${Math.round(rgb[0] * d)},${Math.round(rgb[1] * d)},${Math.round(rgb[2] * d)})`;
+}
+
+function drawScene() {
+  const w = cv.width, h = cv.height;
+  cx.clearRect(0, 0, w, h);
+
+  const theta = angle * Math.PI / 180;
+
+  // Ground grid, so the rotation is readable against something fixed.
+  cx.strokeStyle = '#1b222c';
+  cx.lineWidth = 1;
+  for (let i = -5; i <= 5; i++) {
+    const a = project([i, -1.4, -5], w, h), b = project([i, -1.4, 5], w, h);
+    const c = project([-5, -1.4, i], w, h), d = project([5, -1.4, i], w, h);
+    cx.beginPath(); cx.moveTo(a.x, a.y); cx.lineTo(b.x, b.y); cx.stroke();
+    cx.beginPath(); cx.moveTo(c.x, c.y); cx.lineTo(d.x, d.y); cx.stroke();
+  }
+
+  // Setpoint reference: where the nose should point (attitude = 0).
+  const o = project([0, -1.39, 0], w, h);
+  const sp = project([0, -1.39, 4.6], w, h);
+  cx.strokeStyle = '#3ddc97'; cx.setLineDash([6, 5]); cx.lineWidth = 2;
+  cx.beginPath(); cx.moveTo(o.x, o.y); cx.lineTo(sp.x, sp.y); cx.stroke();
+  cx.setLineDash([]);
+  cx.fillStyle = '#3ddc97'; cx.font = '12px Consolas, monospace';
+  cx.fillText('setpoint 0°', sp.x + 8, sp.y);
+
+  // Body heading: where it actually points.
+  const hd = project(rotY([0, -1.39, 4.6], theta), w, h);
+  cx.strokeStyle = '#ffbe3c'; cx.lineWidth = 2;
+  cx.beginPath(); cx.moveTo(o.x, o.y); cx.lineTo(hd.x, hd.y); cx.stroke();
+
+  // The rigid body itself.
+  const faces = bodyFaces().map(f => {
+    const pts = f.pts.map(p => rotY(p, theta));
+    const proj = pts.map(p => project(p, w, h));
+    const depth = proj.reduce((s, p) => s + p.depth, 0) / proj.length;
+    return { proj, depth, fill: shade(f.color, pts) };
+  });
+  faces.sort((a, b) => b.depth - a.depth);   // far to near
+
+  for (const f of faces) {
+    cx.beginPath();
+    cx.moveTo(f.proj[0].x, f.proj[0].y);
+    for (let i = 1; i < f.proj.length; i++) cx.lineTo(f.proj[i].x, f.proj[i].y);
+    cx.closePath();
+    cx.fillStyle = f.fill;
+    cx.fill();
+    cx.strokeStyle = 'rgba(0,0,0,.35)';
+    cx.lineWidth = 1;
+    cx.stroke();
+  }
+
+  drawThrust(w, h, theta);
+  drawHud(w, h);
+}
+
+// The commanded torque, drawn as a curved arrow around the rotation axis.
+function drawThrust(w, h, theta) {
+  if (Math.abs(duty) < 0.6) return;
+  const c = project([0, 1.35, 0], w, h);
+  const r = 62;
+  const dir = duty > 0 ? 1 : -1;
+  const sweep = (Math.abs(duty) / 100) * Math.PI * 1.25;
+  const a0 = -Math.PI / 2 + theta;
+
+  cx.save();
+  cx.translate(c.x, c.y);
+  cx.scale(1, Math.sin(PITCH) + 0.28);            // squash into the ground plane
+  cx.strokeStyle = duty > 0 ? '#4ea1ff' : '#ff6b6b';
+  cx.lineWidth = 5;
+  cx.lineCap = 'round';
+  cx.beginPath();
+  cx.arc(0, 0, r, a0, a0 + dir * sweep, dir < 0);
+  cx.stroke();
+
+  const aEnd = a0 + dir * sweep;
+  const tip = [Math.cos(aEnd) * r, Math.sin(aEnd) * r];
+  const tangent = aEnd + dir * Math.PI / 2;
+  cx.beginPath();
+  cx.moveTo(tip[0], tip[1]);
+  cx.lineTo(tip[0] - Math.cos(tangent - 0.5) * 15, tip[1] - Math.sin(tangent - 0.5) * 15);
+  cx.lineTo(tip[0] - Math.cos(tangent + 0.5) * 15, tip[1] - Math.sin(tangent + 0.5) * 15);
+  cx.closePath();
+  cx.fillStyle = duty > 0 ? '#4ea1ff' : '#ff6b6b';
+  cx.fill();
+  cx.restore();
+
+  cx.fillStyle = duty > 0 ? '#4ea1ff' : '#ff6b6b';
+  cx.font = '12px Consolas, monospace';
+  cx.fillText('torque ' + (duty > 0 ? '+' : '−') + Math.abs(duty).toFixed(0) + '%', c.x + 74, c.y - 4);
+}
+
+function drawHud(w, h) {
+  cx.fillStyle = '#7d8799';
+  cx.font = '12px Consolas, monospace';
+  cx.fillText('t = ' + tSim.toFixed(2) + ' s', 14, 22);
+  cx.fillText(plantOn ? 'closed loop' : 'open loop', 14, 40);
+  cx.fillStyle = '#ffbe3c';
+  cx.fillText('attitude ' + (angle >= 0 ? '+' : '−') + Math.abs(angle).toFixed(2) + '°', 14, h - 16);
+}
+
+// ------------------------------------------------------------- strip chart ----
+const ch = document.getElementById('chart');
+const kx = ch.getContext('2d');
+
+function drawChart() {
+  const w = ch.width, h = ch.height;
+  kx.clearRect(0, 0, w, h);
+  kx.strokeStyle = '#1b222c'; kx.lineWidth = 1;
+  kx.beginPath(); kx.moveTo(0, h / 2); kx.lineTo(w, h / 2); kx.stroke();
+
+  if (history.length < 2) return;
+
+  const t1 = history[history.length - 1].t;
+  const t0 = t1 - HISTORY_SPAN;
+  const X = t => (t - t0) / HISTORY_SPAN * w;
+
+  const series = [
+    { key: 'angle', color: '#ffbe3c', scale: 30, label: 'attitude  ±30°' },
+    { key: 'duty',  color: '#4ea1ff', scale: 100, label: 'duty  ±100%' },
+  ];
+
+  for (const s of series) {
+    kx.beginPath();
+    history.forEach((p, i) => {
+      const y = h / 2 - (p[s.key] / s.scale) * (h / 2 - 8);
+      const x = X(p.t);
+      i ? kx.lineTo(x, y) : kx.moveTo(x, y);
+    });
+    kx.strokeStyle = s.color;
+    kx.lineWidth = 2;
+    kx.stroke();
+  }
+
+  kx.font = '11px Consolas, monospace';
+  series.forEach((s, i) => {
+    kx.fillStyle = s.color;
+    kx.fillText(s.label, 10, 16 + i * 15);
+  });
+}
+
+// ------------------------------------------------------------------- loop ----
+function frame() {
+  drawScene();
+  drawChart();
+  requestAnimationFrame(frame);
+}
+updateReadouts();
+frame();
+</script>
+</body>
+</html>
