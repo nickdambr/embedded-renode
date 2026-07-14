@@ -1,0 +1,8 @@
+// STM32F405 with a single-axis gyro on I2C1.
+//
+// The Gyro1D class is compiled at runtime from gyro1d.cs, which the .resc
+// includes before loading this platform.
+
+using "platforms/cpus/stm32f4.repl"
+
+gyro: Sensors.Gyro1D @ i2c1 0x6B

@@ -1,0 +1,18 @@
+# Markdown: only README.md files are ever tracked
+*.md
+!README.md
+!**/README.md
+
+# Build outputs
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+
+# Renode / editor scratch
+*.log
+uart.log
+.vscode/

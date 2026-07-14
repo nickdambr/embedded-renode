@@ -1,0 +1,34 @@
+:name: 01-attitude-pid-1d
+:description: Single-axis attitude regulation - gyro on I2C, PID, PWM torque command
+
+$bin ?= $ORIGIN/../build/firmware.elf
+
+using sysbus
+mach create "attitude"
+
+include $ORIGIN/gyro1d.cs
+machine LoadPlatformDescription $ORIGIN/attitude.repl
+
+showAnalyzer sysbus.usart2
+
+macro reset
+"""
+    sysbus LoadELF $bin
+"""
+runMacro $reset
+
+echo ""
+echo "  1-axis attitude control - PID -> PWM"
+echo "  ------------------------------------"
+echo "  start                              run the simulation"
+echo ""
+echo "  Open loop (the disturbance persists; you are the physics):"
+echo "    sysbus.i2c1.gyro AngularRateZ 30   inject +30 deg/s"
+echo "    sysbus.i2c1.gyro AngularRateZ 0    stop the disturbance"
+echo ""
+echo "  Closed loop (the plant reacts to the PWM and the disturbance decays):"
+echo "    sysbus.i2c1.gyro PlantEnabled true"
+echo "    sysbus.i2c1.gyro AngularRateZ 30   kick the vehicle"
+echo ""
+echo "  sysbus ReadDoubleWord 0x40000834     read TIM4_CCR1 (100 = zero torque)"
+echo ""
