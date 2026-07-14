@@ -25,22 +25,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 
-function Find-Renode {
-    if ($env:RENODE_PATH) {
-        if (Test-Path $env:RENODE_PATH) { return $env:RENODE_PATH }
-        throw "RENODE_PATH is set to '$env:RENODE_PATH' but that file does not exist."
-    }
-    $onPath = Get-Command 'renode' -ErrorAction SilentlyContinue
-    if ($onPath) { return $onPath.Source }
-    foreach ($candidate in @(
-            "$env:ProgramFiles\Renode\bin\Renode.exe",
-            "$env:ProgramFiles\Renode\Renode.exe",
-            "$env:USERPROFILE\tools\renode\*\renode.exe")) {
-        $hit = Get-Item -Path $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($hit) { return $hit.FullName }
-    }
-    throw "Renode not found. Install it (winget install --id Renode.Renode -e) or set RENODE_PATH."
-}
+. (Join-Path $projectRoot 'renode-monitor.ps1')
 
 $elf = Join-Path $projectRoot 'build\firmware.elf'
 if (-not (Test-Path $elf)) { throw "build\firmware.elf not found - run .\build.ps1 first." }
@@ -52,62 +37,24 @@ $toFwd = { param($p) $p -replace '\\', '/' }
 $renodeDir = & $toFwd (Join-Path $projectRoot 'renode')
 $elfFwd = & $toFwd $elf
 
-$renode = Find-Renode
-Get-Process -Name 'renode' -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 300
-
-Write-Host "renode  : $renode"
-$proc = Start-Process -FilePath $renode `
-    -ArgumentList @('--disable-xwt', '--plain', '-P', "$MonitorPort") `
-    -PassThru -WindowStyle Hidden
-
-$monitor = $null
+$session = $null
 $uart = $null
 $listener = $null
 $sse = New-Object System.Collections.ArrayList
 
 try {
-    # ------------------------------------------------------- Renode monitor ----
-    $deadline = (Get-Date).AddSeconds(90)
-    while ((Get-Date) -lt $deadline) {
-        try {
-            $monitor = New-Object System.Net.Sockets.TcpClient
-            $monitor.Connect('127.0.0.1', $MonitorPort)
-            break
-        } catch {
-            $monitor = $null
-            Start-Sleep -Milliseconds 300
-        }
-    }
-    if (-not $monitor) { throw "Renode monitor did not open port $MonitorPort" }
-
-    $monStream = $monitor.GetStream()
-    $ascii = [System.Text.Encoding]::ASCII
-    Start-Sleep -Milliseconds 800
-
-    function Send-Monitor {
-        param([string]$Command, [int]$SettleMs = 700)
-        $b = $ascii.GetBytes("$Command`n")
-        $monStream.Write($b, 0, $b.Length)
-        $monStream.Flush()
-        Start-Sleep -Milliseconds $SettleMs
-        $drain = New-Object byte[] 65536
-        while ($monStream.DataAvailable) {
-            [void]$monStream.Read($drain, 0, $drain.Length)
-            Start-Sleep -Milliseconds 60
-        }
-    }
-
     Write-Host 'booting the machine...'
-    Send-Monitor 'mach create "attitude"'
-    Send-Monitor "include @$renodeDir/gyro1d.cs" 7000
-    Send-Monitor "machine LoadPlatformDescription @$renodeDir/attitude.repl" 4000
-    Send-Monitor "sysbus LoadELF @$elfFwd" 5000
+    $session = Start-RenodeMonitor -Port $MonitorPort
+
+    [void](Send-RenodeCommand $session 'mach create "attitude"')
+    [void](Send-RenodeCommand $session "include @$renodeDir/gyro1d.cs" 7000)
+    [void](Send-RenodeCommand $session "machine LoadPlatformDescription @$renodeDir/attitude.repl" 4000)
+    [void](Send-RenodeCommand $session "sysbus LoadELF @$elfFwd" 5000)
 
     # USART2 out of the emulator and onto a socket this script can read.
-    Send-Monitor "emulation CreateServerSocketTerminal $UartPort ""viz"" false"
-    Send-Monitor 'connector Connect sysbus.usart2 viz'
-    Send-Monitor 'start' 1500
+    [void](Send-RenodeCommand $session "emulation CreateServerSocketTerminal $UartPort ""viz"" false")
+    [void](Send-RenodeCommand $session 'connector Connect sysbus.usart2 viz')
+    [void](Send-RenodeCommand $session 'start' 1500)
 
     # --------------------------------------------------------- UART stream ----
     $deadline = (Get-Date).AddSeconds(20)
@@ -136,27 +83,14 @@ try {
 
     if (-not $NoBrowser) { Start-Process "http://localhost:$HttpPort" }
 
+    $ascii = [System.Text.Encoding]::ASCII
     $html = [System.IO.File]::ReadAllBytes($indexHtml)
     $ctxTask = $listener.GetContextAsync()
     $pending = ''
     $buf = New-Object byte[] 8192
 
-    function Publish {
-        param([string]$Line)
-        $payload = $ascii.GetBytes("data: $Line`n`n")
-        foreach ($client in @($sse)) {
-            try {
-                $client.OutputStream.Write($payload, 0, $payload.Length)
-                $client.OutputStream.Flush()
-            } catch {
-                [void]$sse.Remove($client)
-                try { $client.Close() } catch { }
-            }
-        }
-    }
-
     while ($true) {
-        if ($proc.HasExited) { throw 'Renode exited unexpectedly.' }
+        if ($session.Process.HasExited) { throw 'Renode exited unexpectedly.' }
 
         # --- serve HTTP ---
         if ($ctxTask.IsCompleted) {
@@ -176,7 +110,7 @@ try {
                 $c = $req.QueryString['c']
                 if ($c) {
                     Write-Host "  > $c"
-                    Send-Monitor $c 60
+                    [void](Send-RenodeCommand $session $c 60)
                 }
                 $res.StatusCode = 204
                 $res.Close()
@@ -199,7 +133,18 @@ try {
                 $idx = $pending.IndexOf("`n")
                 $line = $pending.Substring(0, $idx).TrimEnd("`r")
                 $pending = $pending.Substring($idx + 1)
-                if ($line.Trim()) { Publish $line }
+                if ($line.Trim()) {
+                    $payload = $ascii.GetBytes("data: $line`n`n")
+                    foreach ($client in @($sse)) {
+                        try {
+                            $client.OutputStream.Write($payload, 0, $payload.Length)
+                            $client.OutputStream.Flush()
+                        } catch {
+                            [void]$sse.Remove($client)
+                            try { $client.Close() } catch { }
+                        }
+                    }
+                }
             }
         }
 
@@ -211,6 +156,5 @@ try {
     foreach ($client in @($sse)) { try { $client.Close() } catch { } }
     if ($listener) { try { $listener.Stop() } catch { } }
     if ($uart) { try { $uart.Close() } catch { } }
-    if ($monitor) { try { $monitor.Close() } catch { } }
-    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+    Stop-RenodeMonitor $session
 }

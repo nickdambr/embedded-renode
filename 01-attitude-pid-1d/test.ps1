@@ -21,24 +21,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 
-# ---------------------------------------------------------------- helpers ----
+. (Join-Path $projectRoot 'renode-monitor.ps1')
 
-function Find-Renode {
-    if ($env:RENODE_PATH) {
-        if (Test-Path $env:RENODE_PATH) { return $env:RENODE_PATH }
-        throw "RENODE_PATH is set to '$env:RENODE_PATH' but that file does not exist."
-    }
-    $onPath = Get-Command 'renode' -ErrorAction SilentlyContinue
-    if ($onPath) { return $onPath.Source }
-    foreach ($candidate in @(
-            "$env:ProgramFiles\Renode\bin\Renode.exe",
-            "$env:ProgramFiles\Renode\Renode.exe",
-            "$env:USERPROFILE\tools\renode\*\renode.exe")) {
-        $hit = Get-Item -Path $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($hit) { return $hit.FullName }
-    }
-    throw "Renode not found. Install it (winget install --id Renode.Renode -e) or set RENODE_PATH."
-}
+# ---------------------------------------------------------------- helpers ----
 
 $script:failures = 0
 
@@ -78,53 +63,20 @@ function Get-Telemetry {
 function Invoke-RenodeScenario {
     param([string[]]$Commands, [string]$LogPath)
 
-    $renode = Find-Renode
-    Get-Process -Name 'renode' -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 300
-
-    $proc = Start-Process -FilePath $renode `
-        -ArgumentList @('--disable-xwt', '--plain', '-P', "$Port") `
-        -PassThru -WindowStyle Hidden
-
+    $session = $null
     try {
-        $client = $null
-        $deadline = (Get-Date).AddSeconds(90)
-        while ((Get-Date) -lt $deadline) {
-            try {
-                $client = New-Object System.Net.Sockets.TcpClient
-                $client.Connect('127.0.0.1', $Port)
-                break
-            } catch {
-                $client = $null
-                Start-Sleep -Milliseconds 300
-            }
-        }
-        if (-not $client) { throw "Renode monitor did not open port $Port" }
-
-        $stream = $client.GetStream()
-        $enc = [System.Text.Encoding]::ASCII
-        Start-Sleep -Milliseconds 800
+        $session = Start-RenodeMonitor -Port $Port
 
         foreach ($cmd in $Commands) {
-            $bytes = $enc.GetBytes("$cmd`n")
-            $stream.Write($bytes, 0, $bytes.Length)
-            $stream.Flush()
-
             # Give the slow commands (C# compile, ELF load, simulated time) room.
             $wait = 1200
             if ($cmd -match '^(include|machine Load|sysbus LoadELF)') { $wait = 8000 }
             if ($cmd -match '^emulation RunFor') { $wait = 25000 }
-            Start-Sleep -Milliseconds $wait
 
-            $buf = New-Object byte[] 65536
-            while ($stream.DataAvailable) {
-                [void]$stream.Read($buf, 0, $buf.Length)
-                Start-Sleep -Milliseconds 100
-            }
+            [void](Send-RenodeCommand $session $cmd $wait)
         }
-        $client.Close()
     } finally {
-        try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+        Stop-RenodeMonitor $session
     }
 
     if (-not (Test-Path $LogPath)) { throw "Renode produced no log at $LogPath" }
